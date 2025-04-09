@@ -1,0 +1,105 @@
+plugins {
+    id 'java-library'
+    id 'org.springframework.boot' version '3.4.4' // Only needed if you have Spring Boot auto-configuration
+    id 'io.spring.dependency-management' version '1.1.7'
+    id 'maven-publish'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework:spring-web'
+    implementation 'org.springframework.boot:spring-boot-starter-aop'
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            groupId = 'com.example'
+            artifactId = 'common-logger'
+            version = '0.0.1-SNAPSHOT'
+
+            // 🚨 Don't just use 'from components.java' (bootJar might hijack it)
+            artifact tasks.named('jar').get().archiveFile
+        }
+    }
+
+    repositories {
+        mavenLocal()
+    }
+}
+
+// Define a separate task to modify the generated POM file
+tasks.register("fixPom") {
+    dependsOn tasks.named("generatePomFileForMavenJavaPublication")
+    doLast {
+        def pomFile = file("$buildDir/publications/mavenJava/pom-default.xml")
+        def parser = new XmlParser()
+        def pom = parser.parse(pomFile)
+        def dependenciesNode = pom.dependencies ? pom.dependencies[0] : new Node(pom, 'dependencies')
+
+        // Use lazy evaluation to defer resolution of the configurations until execution time
+        def runtimeDeps = project.providers.provider {
+            configurations.runtimeClasspath.allDependencies.findAll { dep ->
+                dep.group && dep.name && dep.version
+            }
+        }.get()
+        def compileOnlyDeps = project.providers.provider {
+            configurations.compileOnly.allDependencies
+        }.get()
+
+        runtimeDeps.each { dep ->
+            def dependencyNode = new Node(dependenciesNode, 'dependency')
+            dependencyNode.appendNode('groupId', dep.group)
+            dependencyNode.appendNode('artifactId', dep.name)
+            dependencyNode.appendNode('version', dep.version)
+            if (compileOnlyDeps.contains(dep)) {
+                dependencyNode.appendNode('scope', 'provided')
+            }
+        }
+        def writer = new StringWriter()
+        def printer = new XmlNodePrinter(new PrintWriter(writer))
+        printer.print(pom)
+        pomFile.text = writer.toString()
+    }
+}
+
+// Ensure that the POM is fixed before publishing locally.
+tasks.named("publishMavenJavaPublicationToMavenLocal") {
+    dependsOn tasks.named("fixPom")
+}
+
+// Temporary workaround: mark Maven POM generation tasks as not tracking state to lessen configuration cache issues.
+tasks.withType(GenerateMavenPom).configureEach {
+    doNotTrackState("Workaround for configuration cache issues")
+}
+
+// Disable version validation (safe since we’re explicitly adding versions)
+tasks.named('generateMetadataFileForMavenJavaPublication') {
+    suppressedValidationErrors.add('dependencies-without-versions')
+}
+
+tasks.named('bootJar') {
+    enabled = false
+}
+
+tasks.named('jar') {
+    enabled = true
+}
